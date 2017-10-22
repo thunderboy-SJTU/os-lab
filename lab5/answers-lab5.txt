@@ -1,0 +1,49 @@
+Question1：How long approximately did it take you to do this lab?
+大概花了三个下午加晚上的时间来做这个lab，总共大概是16-18个小时。在challenge上花的时间要多一些，大概有3-4个小时。
+Question2：We redesigned the file system this year with the goal of making it more comprehensible in a week-long lab. Do you feel like you gained an understanding of how to build a file system? Feel free to suggest things we could improve.
+我觉得这个lab还是不错的。由于在CSE课上写过inode文件系统，所以对文件系统就有一定的了解。在这个部分中感觉收获比较大的是bc_pgfault那部分以及最后的challenge部分，让我对文件系统通过将文件导入内存再到运行有了更深刻的看法。也希望这个lab能够多让我们实现一些函数比如read_file，write_file等，以锻炼我们的能力。
+
+Challenge! Implement Unix-style exec
+我选择了实现一个简单的Unix-style 的exec函数。在之前，lib通过spawn来创建一个运行某个文件的进程。spawn直接在父进程调用exofork，并根据文件初始化地址空间。
+exec的一个难点就是，你运行exec函数时，你已经处在了当前进程（或者是已经fork后的子进程），如果直接修改页表的映射，也会影响到自己进程的运行。
+因此，一个解决方法是，先把对应的文件各部分映射到一块空闲的区域（加一个offset），然后调用sys_exec函数，在kernel中进行page_insert,并且修改tf中的esp和eip，这样，就达到了exec的目的。
+同时，在原先的spawn函数中，还调用了init_stack函数，在USTACKTOP-PGSIZE这块区域，初始化了stack。同样，我也将这部分映射到一个区域，在kernel中重新映射回USTACKTOP-PGSIZE。
+之后，在sys_exec修改了curenv的地址空间以及初始化stack后，修改eip和esp，运行env_run，就实现了一次调用，永不返回的exec。
+最开始，我选择映射的地址为0xd0000000，但结果无法正常工作，显示[00001009] unknown device type 2097168，估计是那块内存被用来作为设备的相关操作。
+之后，我将映射的地址改为0xe0000000，就能够正常实现exec的操作。
+我写了一个测试文件，借鉴了icode.c，写了一个exec.c
+#include <inc/lib.h>
+
+void
+umain(int argc, char **argv)
+{
+	int r;
+	cprintf("i am parent environment %08x\n", thisenv->env_id);
+	if ((r = execl("/init", "init", 0)) < 0)
+		panic("exec(init) failed: %e", r);
+        cprintf("i am parent environment %08x\n", thisenv->env_id);
+}
+在qemu中显示如下：
+FS is running
+FS can do I/O
+Device 1 presence: 1
+block cache is good
+superblock is good
+bitmap is good
+alloc_block is good
+file_open is good
+file_get_block is good
+file_flush is good
+file_truncate is good
+i am parent environment 00001009
+file rewrite is good
+init: running
+init: data seems okay
+init: bss seems okay
+init: args: 'init'
+init: exiting
+[00001009] exiting gracefully
+No more runnable environments!
+Welcome to the JOS kernel monitor!
+
+可以看到，该进程的确执行了/init文件，同时也没有返回该函数（最后一句cprintf没有打印），而且进程的号码也没有发生改变，说明exec的实现是成功的。

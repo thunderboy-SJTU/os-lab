@@ -1,0 +1,72 @@
+Question
+1.Assuming that the following JOS kernel code is correct, what type should variable x have, uintptr_t or physaddr_t?
+	mystery_t x;
+	char* value = return_a_pointer();
+	*value = 10;
+	x = (mystery_t) value;
+
+答：x应为uintptr_t类型，显然value是一个c中的指针，必然为虚拟地址，而将value赋给x，说明x也为虚拟地址，所以应为uintptr_t类型。
+
+2.What entries (rows) in the page directory have been filled in at this point? What addresses do they map and where do they point? In other words, fill out this table as much as possible:
+Entry	Base Virtual Address	Points to (logically):
+1023	    0xffc00000	     Page table for top 4MB of phys memory
+1022	    0xff800000	     Page table for second top 4MB of phys memory
+ 960        0xf0000000       Page table for bottom 4MB of phys memory
+ 958        0xef800000       Page table for kernel stack
+ 957        0xef400000       Page table for current page table   //这个没有在boot_map_region中出现，但在showmappings中有，推测是在mem_init中kern_pgdir[PDX(UVPT)] = PADDR(kern_pgdir) | PTE_U | PTE_P时进行映射
+ 956        0xef000000       Page table for pages
+   2	    0x00800000	     Nothing
+   1	    0x00400000	     Nothing
+   0	    0x00000000	     Nothing
+
+3.(From Lecture 3) We have placed the kernel and user environment in the same address space. Why will user programs not be able to read or write the kernel's memory? What specific mechanisms protect the kernel memory?
+   因为在PDE和PTE中，有PTE_U位，当此位置为1时，允许用户读或写，而此位置为0时，用户就不具有访问权限。通过将kernel's memory相关的PTE中的PTE_U位设置为0，就可以避免用户对这些内存的访问。
+
+4.What is the maximum amount of physical memory that this operating system can support? Why?
+   以UPAGES为起始地址的PTSIZE大小的内存部分用于存储pages。一个Page结构占用8个byte，由于这块区域只有PTSIZE大小，即4M大小，因此共可以存放4M/8 = 0.5M的Page结构体。一个page对应大小为4K，所以一共对应2G的物理内存，所以最大只能支持2G物理内存。
+
+5.How much space overhead is there for managing memory, if we actually had the maximum amount of physical memory? How is this overhead broken down?
+   由上题得知，存放page需要4M，page directory大小为1024*4byte = 4k，page table因为只有0.5Mpage，共需0.5M*4byte = 2M，所以共有6M+4k的overhead。可以扩展UPAGES起始存放page的内存为2*PTSIZE，这样就可以完全利用物理的4G内存，由于扩大了基数，可以看做overhead降低。还可以将4K页变为4M页，这样也可以显著降低overhead。
+
+6.Revisit the page table setup in kern/entry.S and kern/entrypgdir.c. Immediately after we turn on paging, EIP is still a low number (a little over 1MB). At what point do we transition to running at an EIP above KERNBASE? What makes it possible for us to continue executing at a low EIP between when we enable paging and when we begin running at an EIP above KERNBASE? Why is this transition necessary?
+  执行jmp *%eax后，running at an EIP ablove KERNBASE.因为在entry_pgdir映射的时候，将[0,4MB)以及[KERNBASE,KERNBASE+4MB）的空间都映射到了物理地址的[0,4MB）,因此，在lcr3以及开启page机制后，变为虚拟内存，但[0,4MB）上的虚拟地址和物理地址仍然一一对应，所以程序能够继续运行。而此时relocated由于virtual address加了0xf0000000的原因，jmp *eax后跳到了0xf开头的虚拟地址，这就完成了EIP向高虚拟地址的KERNBASE的转变，也真正完成了物理地址到虚拟地址的转变，并且程序的运行不会受到任何影响。
+
+
+Challenge：
+我选择了第一个题目：
+1.Display in a useful and easy-to-read format all of the physical page mappings (or lack thereof) that apply to a particular range of virtual/linear addresses in the currently active address space. For example, you might enter 'showmappings 0x3000 0x5000' to display the physical page mappings and corresponding permission bits that apply to the pages at virtual addresses 0x3000, 0x4000, and 0x5000.
+2.Explicitly set, clear, or change the permissions of any mapping in the current address space.
+3.Dump the contents of a range of memory given either a virtual or physical address range. Be sure the dump code behaves correctly when the range extends across page boundaries!
+4.Do anything else that you think might be useful later for debugging the kernel. (There's a good chance it will be!)
+
+对于showmappings命令，我按照了示例的格式，为showmappings [beginaddr] [endaddr]。我直接对起始地址和终止地址间相隔一定间隔的各个虚拟地址，调用了pgdir_walk函数，若返回为NULL或pte的PTE_P为0，就不显示，否则，就根据pte，获得对应的物理地址范围及权限。由于进行了大页的分配，因此间隔根据pte上的PTE_PS位为准，若该位为0，则间隔PGSIZE,否则间隔PTSIZE（并未显示页表不存在及PTE_P为0的虚拟地址的映射）。若PTE_W位置上，则可写，若PTE_U置上，则用户可访问。
+显示结果如下：（分别为虚拟地址范围、物理地址范围、kernel权限、user权限）
+K> showmappings 0xf0000000 0xf1000000
+0xf0000000 - 0xf03fffff   0x00000000 - 0x003fffff   kernel:R/W  user:-/-  
+0xf0400000 - 0xf07fffff   0x00400000 - 0x007fffff   kernel:R/W  user:-/-  
+0xf0800000 - 0xf0bfffff   0x00800000 - 0x00bfffff   kernel:R/W  user:-/-  
+0xf0c00000 - 0xf0ffffff   0x00c00000 - 0x00ffffff   kernel:R/W  user:-/- 
+
+对于修改permission，我设置了changeperm命令，用于修改相应的perm，具体格式为changeperm [op] [addr] ([perm])。具体实现为根据虚拟地址，通过pgdir_walk获得pte。由于不知道change和set有什么区别，我将这两者的功能设置为相同，将pte后12bit清零，或上用户指定的perm。在之前对perm进行检查，若超过0x00000FFF，则报错。对于clear指令，只是简单的将后12位bit置为0。
+显示结果如下：
+K> showmappings 0xef000000 0xef001000
+0xef000000 - 0xef000fff   0x0011b000 - 0x0011bfff   kernel:R/-  user:R/-  
+K> changeperm set 0xef000000 3
+success
+K> showmappings 0xef000000 0xef001000
+0xef000000 - 0xef000fff   0x0011b000 - 0x0011bfff   kernel:R/W  user:-/-
+
+第三个要求是能够通过虚拟地址和物理地址dump出相应的内容，具体格式为dump [op] [addr] [size]，其中op为v或p，对应虚拟地址和物理地址。通过pgdir_walk获得pte，若找不到相应pte，用‘-’占位，表示找不到对应页表，也找不到相应数据。若页表存在，则直接根据虚拟地址及size，通过指针，获得其中的数据内容。若为物理地址，则每次累加size后，将物理地址通过KADDR转化为虚拟地址，再获得其中的数据。
+显示结果如下：
+K> dump v 0xef000000 10
+0xef000000: 0x00000000 0x00000001 0xf013b7f0 0x00000000 
+0xef000010: 0xf011b008 0x00000000 0xf011b010 0x00000000 
+0xef000020: 0xf011b018 0x00000000 
+K> dump p 0x0011b000 10
+0x0011b000: 0x00000000 0x00000001 0xf013b7f0 0x00000000 
+0x0011b010: 0xf011b008 0x00000000 0xf011b010 0x00000000 
+0x0011b020: 0xf011b018 0x00000000 
+
+5140379064 陈俊
+
+

@@ -1,0 +1,50 @@
+Question1：How did you structure your transmit implementation? In particular, what do you do if the transmit ring is full?
+首先，在output.c中，接收nsipcbuf，获得其中的data地址以及长度，将这两者传入sys_transmit_packet中，并且不断循环来发送包。在sys_transmit中，构建一个tx_desc的对象，将data地址转成物理地址放进对象中，再把len也放入对象中。
+之后，调用transmit_packet，将td的地址作为参数传入。在transmit_packet中，获得tdt，找到其在tx_table（TX ring）中的td，将原先的td赋给这个td，并修改器cmd中的值，并将tdt往后推延一个，这样就完成了transmit过程。
+特别地，当tx ring满的时候，transmit_packet会返回-1，这时候，在sys_transmit_packet会对transmit_packet返回值进行判断，本来是不断循环，遇到返回值为0则break跳出；若为-1，则继续循环，直至tx ring空闲。
+
+Question2：How did you structure your receive implementation? In particular, what do you do if the receive queue is empty and a user environment requests the next incoming packet?
+我在初始化rx_table（RX ring）的同时，也初始化了一个rx_buf，用来当作每个rx_desc的地址。在初始化rx_table的同时，将rx_table中的buffer_addr设为rx_buf中对应数组的地址。
+在intput.c中，调用sys_receive_packet，获得buf的地址和长度。通过memmove，将data的内容copy到指定的地址，并通过ipc_send发送给core network进程。
+在sys_receive_packet中，构建一个rx_desc的对象，并将其指针作为参数传给receive_packet函数，获得rd。将rd中的地址通过KADDR转为虚拟地址，再将内容memset到buf的地址。
+在receive_packet中，将(*rdt + 1) % RXDESC_LENGTH作为读取的对象，从rx_table中读取相应的rd。同时，清空该rd的DD位和EOP位，告诉e1000这块区域可以重新使用，并更新rdt，这样就完成了receive过程。
+特别地，当rx_ring为空的时候，会返回-1，sys_receive_packet也会返回-1。在input.c中，如果返回值小于0，则在循环中调用sys_yield，否则不符合条件，跳出循环，这样就实现了一直等待接收的效果。
+
+Question3：What does the web page served by JOS's web server say?
+当输入http://localhost:26002/index.html后，显示
+
+This file came from JOS.
+
+Cheesy web page!
+
+Qustion4：How long approximately did it take you to do this lab?
+一共花了四天左右的时间，大概是25-30小时。
+
+Challenge：
+Challenge! Read about the EEPROM in the developer's manual and write the code to load the E1000's MAC address out of the EEPROM. Currently, QEMU's default MAC address is hard-coded into both your receive initialization and lwIP. Fix your initialization to use the MAC address you read from the EEPROM, add a system call to pass the MAC address to lwIP, and modify lwIP to the MAC address read from the card. Test your change by configuring QEMU to use a different MAC address.
+我选择了第一个challenge，按照所提供的pdf，需要我们去读取eeprom中的mac地址的值。从5.6中的Table5.2 Ethernet Controller Address Map中，可以看到MAC地址保存在00 01 02地址上，共6个byte。通过13.4.4的EERD寄存器，我们就可以做到从EEPROM读取MAC地址。
+首先，往地址处放入要读取的地址（三次分别放入00 01 02），将START位置上1，等到Done位置为1后，从Data段读取data。共分三次读取，就可以读到完整的MAC地址。再将MAC地址存入RAL和RAH，并置上E1000_RAH_AV，这样就存入了正确的MAC地址。通过打印，的确为默认的MAC地址的值。
+之后，写一个syscall，用于读取mac地址。通过读取RAH和RAL，获得mac地址。在net/lwip/jos/jif/jif.c中，将硬编码变成sys_get_mac，就可以从系统调用获得MAC地址。
+此时，代码能够正常通过测试，也并没有硬编码编入MAC地址。
+我尝试使用不同的MAC地址，即在GNUmakefile中加入macaddr = 52:54:00:12:34:57，变成了QEMUOPTS += -net user -net nic,model=e1000,macaddr=52:54:00:12:34:57 -redir tcp:$(PORT7)::7 \。
+同时，为了能够通过测试，我也修改了testinput，将硬编码的mac地址改为了sys_get_mac函数，否则会出现mismatch的情况。
+此时，运行make E1000_DEBUG=TX,TXERR,RX,RXERR,RXFILTER run-net_testinput
+Sending ARP announcement...
+macaddr:302011474
+e1000: index 0: 0x46004 : 900002a 0
+e1000: unicast match[0]: 52:54:00:12:34:57
+length:64
+length:64
+input: 0000   5254 0012 3457 5255  0a00 0202 0806 0001
+input: 0010   0800 0604 0002 5255  0a00 0202 0a00 0202
+input: 0020   5254 0012 3457 0a00  020f 0000 0000 0000
+input: 0030   0000 0000 0000 0000  0000 0000 0000 0000
+
+Waiting for packets...
+能够正常显示修改后的mac地址
+同时也能够正确通过make grade的测试，说明修改是成功的。
+为了保证GNUmakefile的一致性，我删除了测试语句改回了原来的样子，如想测试，修改成上述mac地址语句即可。
+
+
+我也同时实现了第二个Challenge的一部分。在transmit中实现了zero copy，因为可以直接将tx_table中的物理地址指向用户的buf的虚拟地址。但在receive中，我并没有很好的实现zerocopy的办法，还是使用预先设置好的一个buf，并使用了memmove的方法进行了内容的copy。
+

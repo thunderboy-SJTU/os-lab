@@ -1,0 +1,77 @@
+Question1:Compare kern/mpentry.S side by side with boot/boot.S. Bearing in mind that kern/mpentry.S is compiled and linked to run above KERNBASE just like everything else in the kernel, what is the purpose of macro MPBOOTPHYS? Why is it necessary in kern/mpentry.S but not in boot/boot.S? In other words, what could go wrong if it were omitted in kern/mpentry.S? 
+Hint: recall the differences between the link address and the load address that we have discussed in Lab 1.
+答：因为lgdt载入的应为gdt的物理地址。在boot.S中，在载入gdt时都还在保护模式，没有开启页表，因此本身的地址就是物理地址。而在mpentry.S中，若直接使用gdt,显然得到的不是物理地址。由于mpentry.S的代码是链接到KERNBASE之上的，要想获得实际的物理地址，就要用MPBOOTPHYS宏来计算。将内核的线性地址减去mpentry_start，再加上物理起始地址0x7000，才是gdt的物理地址。
+
+Question2：It seems that using the big kernel lock guarantees that only one CPU can run the kernel code at a time. Why do we still need separate kernel stacks for each CPU? Describe a scenario in which using a shared kernel stack will go wrong, even with the protection of the big kernel lock.
+答：首先，在调用lock_kernel之前，CPU已经处于内核态了，在这之前，如果不同CPU有操作内核栈的举动，有很有可能引起混乱。其次，每个CPU可能会在内存栈中保留未来可能会用到的数据，如果不同CPU共享同一个内核栈，就一定会出现覆盖或数据丢失的情况，因此，需要为不同的CPU创建不同的内核栈。
+
+Question3：In your implementation of env_run() you should have called lcr3(). Before and after the call to lcr3(), your code makes references (at least it should) to the variable e, the argument to env_run. Upon loading the %cr3 register, the addressing context used by the MMU is instantly changed. But a virtual address (namely e) has meaning relative to a given address context--the address context specifies the physical address to which the virtual address maps. Why can the pointer e be dereferenced both before and after the addressing switch?
+答：因为当前处于内核态，运行的是kernel段的代码。e位于内核地址空间，对于不同的页表，都对于内核地址空间有相同的映射（位于UTOP之上）。因此，无论是否切换页表，对于内核地址空间的映射都是不变的，所以在lcr3前后都可以正常的使用。
+
+Challenge：（我将challenge部分注释了，如果想测试，可以将sched.c中round-robin部分注释，删去priority部分的注释，即可测试）
+实现了第二个challenge，也就是基于优先级的调度。
+首先，我往struct env中添加了一个新的变量env_prior，用于记录env的优先级。我设置了三个优先级，分别为PRIOR_HIGH,PRIOR_MIDD,PRIOR_LOW。默认env的优先级为PRIOR_MIDD。
+同时，我新增加了一个系统调用sys_env_set_prior，用于修改env的优先级。
+之后，我修改了sched.c中的调度函数，本来是采取Round-Robin，而现在，我新加了两个变量，分别表示当前最高的优先级和对应的env。
+for(i = 0;i < NENV ;i++){
+           next_id = (next_id + 1) % NENV;
+           if(envs[next_id].env_type != ENV_TYPE_IDLE &&
+               envs[next_id].env_status == ENV_RUNNABLE && envs[next_id].env_prior > max_prior){
+                high_prior_id = next_id;
+                max_prior = envs[high_prior_id].env_prior;
+           }
+}
+if((max_prior != 0 && (!curenv)) ||(max_prior != 0 && (curenv->env_prior <= max_prior)) || (max_prior != 0 && curenv->env_status != ENV_RUNNING))
+         env_run(&envs[high_prior_id]);
+这样，就可以保证每次调用运行的将是具有最高优先级的env，如果具有相同的优先级，也会按照Round-Robin公平调度，唯一的不足可能是需要对所有的env都进行一次遍历，会牺牲一定的性能。
+
+我编写了这样的一个测试程序:
+#include<inc/lib.h>
+#include<inc/env.h>
+
+void
+umain(int argc, char **argv)
+{
+    int pid;
+    int i;
+    struct Env* env;
+    if((pid = fork()) != 0){
+        sys_env_set_prior(pid,PRIOR_HIGH);
+        if((pid = fork())!= 0)
+           sys_env_set_prior(pid,PRIOR_LOW);
+    }
+    sys_yield();
+    env = (struct Env*)envs + ENVX(sys_getenvid());
+    for(i = 0; i < 3;i++){
+       if(env->env_prior == PRIOR_HIGH)
+          cprintf("[%08x] HIGH PRIOR %d iteration\n",sys_getenvid(),i);
+       if(env->env_prior == PRIOR_MIDD)
+          cprintf("[%08x] MIDD PRIOR %d iteration\n",sys_getenvid(),i);
+       if(env->env_prior == PRIOR_LOW)
+          cprintf("[%08x] LOW PRIOR %d iteration\n",sys_getenvid(),i);
+       sys_yield();
+    }
+}
+
+测试结果为：
+[00001009] HIGH PRIOR 0 iteration
+[00001009] HIGH PRIOR 1 iteration
+[00001009] HIGH PRIOR 2 iteration
+[00001009] exiting gracefully
+[00001009] free env 00001009
+[00001008] MIDD PRIOR 0 iteration
+[00001008] MIDD PRIOR 1 iteration
+[00001008] MIDD PRIOR 2 iteration
+[00001008] exiting gracefully
+[00001008] free env 00001008
+[0000100a] LOW PRIOR 0 iteration
+[0000100a] LOW PRIOR 1 iteration
+[0000100a] LOW PRIOR 2 iteration
+[0000100a] exiting gracefully
+[0000100a] free env 0000100a
+符合原本的预期，说明实现是成功的。
+
+5140379064 陈俊
+
+
+
